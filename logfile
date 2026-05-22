@@ -1,0 +1,24 @@
+2026-05-22 16:18:17.862 EEST [99834] LOG:  starting PostgreSQL 19devel on aarch64-apple-darwin25.5.0, compiled by Apple clang version 17.0.0 (clang-1700.0.13.5), 64-bit
+2026-05-22 16:18:17.867 EEST [99834] LOG:  could not bind IPv6 address "::1": Address already in use
+2026-05-22 16:18:17.867 EEST [99834] HINT:  Is another postmaster already running on port 5432? If not, wait a few seconds and retry.
+2026-05-22 16:18:17.867 EEST [99834] LOG:  could not bind IPv4 address "127.0.0.1": Address already in use
+2026-05-22 16:18:17.867 EEST [99834] HINT:  Is another postmaster already running on port 5432? If not, wait a few seconds and retry.
+2026-05-22 16:18:17.867 EEST [99834] WARNING:  could not create listen socket for "localhost"
+2026-05-22 16:18:17.867 EEST [99834] FATAL:  could not create any TCP/IP sockets
+2026-05-22 16:18:17.868 EEST [99834] LOG:  database system is shut down
+2026-05-22 16:18:54.217 EEST [341] LOG:  starting PostgreSQL 19devel on aarch64-apple-darwin25.5.0, compiled by Apple clang version 17.0.0 (clang-1700.0.13.5), 64-bit
+2026-05-22 16:18:54.220 EEST [341] LOG:  could not bind IPv6 address "::1": Address already in use
+2026-05-22 16:18:54.220 EEST [341] HINT:  Is another postmaster already running on port 5432? If not, wait a few seconds and retry.
+2026-05-22 16:18:54.220 EEST [341] LOG:  could not bind IPv4 address "127.0.0.1": Address already in use
+2026-05-22 16:18:54.220 EEST [341] HINT:  Is another postmaster already running on port 5432? If not, wait a few seconds and retry.
+2026-05-22 16:18:54.220 EEST [341] WARNING:  could not create listen socket for "localhost"
+2026-05-22 16:18:54.220 EEST [341] FATAL:  could not create any TCP/IP sockets
+2026-05-22 16:18:54.220 EEST [341] LOG:  database system is shut down
+2026-05-22 16:19:06.011 EEST [694] LOG:  starting PostgreSQL 19devel on aarch64-apple-darwin25.5.0, compiled by Apple clang version 17.0.0 (clang-1700.0.13.5), 64-bit
+2026-05-22 16:19:06.013 EEST [694] LOG:  could not bind IPv6 address "::1": Address already in use
+2026-05-22 16:19:06.013 EEST [694] HINT:  Is another postmaster already running on port 5432? If not, wait a few seconds and retry.
+2026-05-22 16:19:06.013 EEST [694] LOG:  could not bind IPv4 address "127.0.0.1": Address already in use
+2026-05-22 16:19:06.013 EEST [694] HINT:  Is another postmaster already running on port 5432? If not, wait a few seconds and retry.
+2026-05-22 16:19:06.013 EEST [694] WARNING:  could not create listen socket for "localhost"
+2026-05-22 16:19:06.013 EEST [694] FATAL:  could not create any TCP/IP sockets
+2026-05-22 16:19:06.014 EEST [694] LOG:  database system is shut down

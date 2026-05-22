@@ -1,0 +1,5 @@
+comment = 'Autonomous Replication Planner - Telemetry, Analysis, and Rule Generation'
+default_version = '1.0'
+relocatable = false
+schema = replication_planner
+requires = 'pg_stat_statements'
