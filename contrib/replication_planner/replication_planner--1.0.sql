@@ -69,7 +69,7 @@ RETURNS TABLE (
     recommendation    TEXT
 )
 AS 'replication_planner', 'rp_collect_index_stats'
-LANGUAGE C STRICT;
+LANGUAGE C;
 
 COMMENT ON FUNCTION replication_planner.collect_index_stats() IS
     'Phase 1-A: Reads pg_stat_user_indexes + pg_statio_user_indexes and '
@@ -95,7 +95,7 @@ RETURNS TABLE (
     skip_reason           TEXT
 )
 AS 'replication_planner', 'rp_collect_table_stats'
-LANGUAGE C STRICT;
+LANGUAGE C;
 
 COMMENT ON FUNCTION replication_planner.collect_table_stats() IS
     'Phase 1-B: Reads pg_class + pg_stat_user_tables to compute '
@@ -116,7 +116,7 @@ RETURNS TABLE (
     heat_tier       TEXT      -- CRITICAL | HOT | WARM | COLD
 )
 AS 'replication_planner', 'rp_collect_workload_stats'
-LANGUAGE C STRICT;
+LANGUAGE C;
 
 COMMENT ON FUNCTION replication_planner.collect_workload_stats() IS
     'Phase 1-C: Reads pg_stat_statements to identify hot SELECT patterns '
@@ -139,7 +139,7 @@ RETURNS TABLE (
     skip_reason       TEXT
 )
 AS 'replication_planner', 'rp_analyze_and_score'
-LANGUAGE C STRICT;
+LANGUAGE C;
 
 COMMENT ON FUNCTION replication_planner.analyze_and_score() IS
     'Phase 2: Heuristic engine. Combines index heat, query frequency, '
@@ -157,7 +157,7 @@ RETURNS TABLE (
     ddl_statement     TEXT
 )
 AS 'replication_planner', 'rp_generate_publication_ddl'
-LANGUAGE C STRICT;
+LANGUAGE C;
 
 COMMENT ON FUNCTION replication_planner.generate_publication_ddl() IS
     'Phase 3: Generates ready-to-run CREATE PUBLICATION DDL '
@@ -189,7 +189,7 @@ $$;
 CREATE FUNCTION replication_planner.run_full_plan()
 RETURNS TEXT
 AS 'replication_planner', 'rp_run_full_plan'
-LANGUAGE C STRICT;
+LANGUAGE C;
 
 COMMENT ON FUNCTION replication_planner.run_full_plan() IS
     'Runs the complete telemetry → analysis → scoring pipeline and '

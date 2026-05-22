@@ -58,7 +58,7 @@ automatically generate optimal logical replication rules.
 
 | Component | Minimum version |
 |---|---|
-| PostgreSQL | 14 (row filters in publications require PG 15+) |
+| PostgreSQL | 15 (REPLICATE_FILTERED publications use PG15 row-filter syntax) |
 | pg_stat_statements | any version bundled with PG |
 | Build tools | `pg_config`, GCC / Clang, `make` |
 
@@ -232,10 +232,8 @@ SET replication_planner.index_heat_threshold = 0.60;
 
 | Parameter | Default | Description |
 |---|---|---|
-| `replication_planner.query_freq_threshold` | `0.80` | Min query frequency ratio to flag a table as hot |
-| `replication_planner.index_heat_threshold` | `0.70` | Min index scan share for "HOT" recommendation |
-| `replication_planner.histogram_hot_threshold` | `0.40` | Min histogram bucket read share for a hot range |
-| `replication_planner.write_heavy_threshold` | `0.90` | Max write ratio before a table is penalised |
+| `replication_planner.index_heat_threshold` | `0.70` | Heat score above which an index is classified HOT in `collect_index_stats` |
+| `replication_planner.write_heavy_threshold` | `0.90` | Write ratio above which a table is penalised in scoring + eligibility |
 
 ```sql
 -- View all current settings
@@ -292,7 +290,7 @@ WHERE tablename = 'orders'
 ## Testing
 
 ```bash
-psql -U postgres -f test/replication_planner_test.sql
+psql -U postgres -f replication_planner_test.sql
 ```
 
 The test script:
