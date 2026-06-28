@@ -49,6 +49,98 @@ PG_FUNCTION_INFO_V1(rp_analyze_and_score);
 PG_FUNCTION_INFO_V1(rp_generate_publication_ddl);
 PG_FUNCTION_INFO_V1(rp_run_full_plan);
 
+/* ----------------------------------------------------------------
+ * Row-filter helpers (shared by analyze_and_score + generate_ddl)
+ * ---------------------------------------------------------------- */
+
+/*
+ * True if the pg_stat_statements extension is installed, so we can mine the
+ * workload for predicate columns.  Must be called while SPI is connected.
+ */
+static bool
+rp_has_pg_stat_statements(void)
+{
+    int rc = SPI_execute(
+        "SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'",
+        true, 1);
+    return (rc == SPI_OK_SELECT && SPI_processed > 0);
+}
+
+/*
+ * Returns the SQL text of the "best_filter" CTE that maps each table to a
+ * data-driven row-filter predicate (col = value).
+ *
+ * has_pgss == true (workload-driven, preferred):
+ *   For every table column, sum the call counts of pg_stat_statements
+ *   entries whose normalised query both mentions the table and uses that
+ *   column in a comparison predicate (col =, col <, col IN ...).  The single
+ *   most-frequently-filtered column wins, and its concrete value is taken
+ *   from pg_stats (most_common_vals, falling back to histogram_bounds).
+ *   pg_stat_statements normalises out the literals, which is why the value
+ *   comes from the planner statistics rather than the query text.
+ *
+ * has_pgss == false (fallback):
+ *   No workload data — pick the lowest-cardinality string column and its
+ *   most-common value, so the functions still work without the extension.
+ *
+ * NOTE: the returned text is appended verbatim (appendStringInfoString), so
+ * it uses single '%' in format(...) — it is NOT a printf format string.
+ */
+static const char *
+rp_best_filter_cte(bool has_pgss)
+{
+    if (has_pgss)
+        return
+            "best_filter AS ("
+            "  WITH wl AS ("
+            "    SELECT c.oid AS relid, a.attname, SUM(s.calls)::bigint AS weight"
+            "    FROM pg_class c"
+            "    JOIN pg_namespace ns ON ns.oid = c.relnamespace"
+            "    JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0"
+            "         AND NOT a.attisdropped"
+            "    JOIN pg_stat_statements s"
+            "      ON s.query ~* ('\\m' || c.relname || '\\M')"
+            "     AND s.query ~* ('\\m' || a.attname ||"
+            "                     '\\M[[:space:]]*(=|<>|!=|<=|>=|<|>)')"
+            "    WHERE c.relkind = 'r'"
+            "      AND ns.nspname NOT IN ('pg_catalog', 'information_schema')"
+            "    GROUP BY c.oid, a.attname"
+            "  ),"
+            "  top_col AS ("
+            "    SELECT DISTINCT ON (relid) relid, attname"
+            "    FROM wl ORDER BY relid, weight DESC, attname"
+            "  )"
+            "  SELECT t.relid,"
+            "    format('%I = %L', t.attname,"
+            "           COALESCE((st.most_common_vals::text::text[])[1],"
+            "                    (st.histogram_bounds::text::text[])[1])) AS row_filter_expr"
+            "  FROM top_col t"
+            "  JOIN pg_class c ON c.oid = t.relid"
+            "  JOIN pg_namespace ns ON ns.oid = c.relnamespace"
+            "  JOIN pg_stats st ON st.schemaname = ns.nspname"
+            "                  AND st.tablename = c.relname"
+            "                  AND st.attname = t.attname"
+            "  WHERE COALESCE((st.most_common_vals::text::text[])[1],"
+            "                 (st.histogram_bounds::text::text[])[1]) IS NOT NULL"
+            ")";
+
+    return
+        "best_filter AS ("
+        "  SELECT DISTINCT ON (c.oid) c.oid AS relid,"
+        "    format('%I = %L', s.attname,"
+        "           (s.most_common_vals::text::text[])[1]) AS row_filter_expr"
+        "  FROM pg_stats s"
+        "  JOIN pg_namespace ns ON ns.nspname = s.schemaname"
+        "  JOIN pg_class c ON c.relname = s.tablename AND c.relnamespace = ns.oid"
+        "  JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = s.attname"
+        "  JOIN pg_type t ON t.oid = a.atttypid"
+        "  WHERE s.n_distinct BETWEEN 2 AND 50"
+        "    AND t.typcategory = 'S'"
+        "    AND s.most_common_vals IS NOT NULL"
+        "  ORDER BY c.oid, s.n_distinct ASC, a.attnum"
+        ")";
+}
+
 /* ================================================================
  * PHASE 1-A  — Index Statistics Collector
  * ================================================================ */
@@ -410,9 +502,12 @@ rp_collect_workload_stats(PG_FUNCTION_ARGS)
  *   final_score >= 0.20       -> REPLICATE_FILTERED
  *   otherwise                 -> SKIP
  *
- * hot_columns / row_filter_expr are derived from the columns of the
- * dominant index per table (not from index names) so the resulting
- * filter is valid SQL.
+ * hot_columns are derived from the columns of the dominant index per
+ * table.  row_filter_expr is a value predicate (col = value) whose
+ * COLUMN is the one the workload filters on most often (mined from
+ * pg_stat_statements) and whose VALUE comes from pg_stats — see
+ * rp_best_filter_cte().  Falls back to the lowest-cardinality string
+ * column when pg_stat_statements is unavailable.
  * ================================================================ */
 Datum
 rp_analyze_and_score(PG_FUNCTION_ARGS)
@@ -426,6 +521,7 @@ rp_analyze_and_score(PG_FUNCTION_ARGS)
     TupleDesc       spi_tupdesc;
     StringInfoData  sql;
     uint64          proc, i;
+    bool            has_pgss;
 
     InitMaterializedSRF(fcinfo, MAT_SRF_BLESS);
     tupdesc       = rsinfo->setDesc;
@@ -434,6 +530,8 @@ rp_analyze_and_score(PG_FUNCTION_ARGS)
 
     if (SPI_connect() != SPI_OK_CONNECT)
         ereport(ERROR, (errmsg("rp_analyze_and_score: SPI_connect failed")));
+
+    has_pgss = rp_has_pg_stat_statements();
 
     initStringInfo(&sql);
     appendStringInfo(&sql,
@@ -475,32 +573,32 @@ rp_analyze_and_score(PG_FUNCTION_ARGS)
         "     JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS x(attnum, ord)"
         "          ON x.attnum > 0"
         "     JOIN pg_attribute a ON a.attrelid = ix.indrelid AND a.attnum = x.attnum"
-        "     WHERE ix.indexrelid = tipt.indexrelid) AS hot_columns,"
-        "    (SELECT string_agg(format('%%I IS NOT NULL', a.attname), ' AND ' ORDER BY x.ord)"
-        "     FROM pg_index ix"
-        "     JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS x(attnum, ord)"
-        "          ON x.attnum > 0"
-        "     JOIN pg_attribute a ON a.attrelid = ix.indrelid AND a.attnum = x.attnum"
-        "     WHERE ix.indexrelid = tipt.indexrelid) AS row_filter_expr"
+        "     WHERE ix.indexrelid = tipt.indexrelid) AS hot_columns"
         "  FROM top_index_per_table tipt"
-        ")"
+        "),");
+
+    /* Splice in the data-driven row-filter CTE (verbatim, not formatted). */
+    appendStringInfoString(&sql, rp_best_filter_cte(has_pgss));
+
+    appendStringInfo(&sql,
         "SELECT"
         "  ts.schemaname,"
         "  ts.tablename,"
         "  CASE WHEN SUM(ts.idx_scan::float8) OVER () = 0 THEN 0.0"
         "       ELSE ts.idx_scan::float8 / SUM(ts.idx_scan::float8) OVER () END AS query_freq_score,"
         "  COALESCE(ih.max_scan_share, 0.0)                AS index_heat_score,"
-        "  CASE WHEN NOT ts.has_pk                THEN 0.1"
-        "       WHEN ts.write_ratio > %f          THEN 0.1"
-        "       WHEN ts.row_estimate < 100        THEN 0.3"
-        "       ELSE 1.0 END                                AS table_elig_score,"
+        "  CASE WHEN NOT ts.has_pk                THEN 0.1::float8"
+        "       WHEN ts.write_ratio > %f          THEN 0.1::float8"
+        "       WHEN ts.row_estimate < 100        THEN 0.3::float8"
+        "       ELSE 1.0::float8 END                        AS table_elig_score,"
         "  COALESCE(ih.hot_columns, 'none')                AS hot_columns,"
-        "  COALESCE(ih.row_filter_expr, '')                AS row_filter_expr,"
+        "  COALESCE(bf.row_filter_expr, '')                AS row_filter_expr,"
         "  ts.write_ratio,"
         "  ts.has_pk,"
         "  ts.row_estimate"
         " FROM table_stats ts"
         " LEFT JOIN index_heat ih ON ih.relid = ts.relid"
+        " LEFT JOIN best_filter bf ON bf.relid = ts.relid"
         " ORDER BY query_freq_score DESC",
         rp_write_heavy_threshold);
 
@@ -629,7 +727,11 @@ rp_analyze_and_score(PG_FUNCTION_ARGS)
 /* ================================================================
  * PHASE 3  — Publication DDL Generator
  * Identifiers are quoted via quote_identifier().
- * Row filters use the dominant index's columns (PG15+ syntax).
+ * Row filters are data-driven value predicates (col = value): the
+ * column is the workload's most-filtered column (pg_stat_statements)
+ * and the value comes from pg_stats — see rp_best_filter_cte().
+ * Filtered tables also get REPLICA IDENTITY FULL so the WHERE clause
+ * is valid for UPDATE/DELETE publication (PG15+ syntax).
  * ================================================================ */
 Datum
 rp_generate_publication_ddl(PG_FUNCTION_ARGS)
@@ -643,6 +745,7 @@ rp_generate_publication_ddl(PG_FUNCTION_ARGS)
     TupleDesc       spi_tupdesc;
     StringInfoData  sql;
     uint64          proc, i;
+    bool            has_pgss;
 
     InitMaterializedSRF(fcinfo, MAT_SRF_BLESS);
     tupdesc       = rsinfo->setDesc;
@@ -651,6 +754,8 @@ rp_generate_publication_ddl(PG_FUNCTION_ARGS)
 
     if (SPI_connect() != SPI_OK_CONNECT)
         ereport(ERROR, (errmsg("rp_generate_publication_ddl: SPI_connect failed")));
+
+    has_pgss = rp_has_pg_stat_statements();
 
     initStringInfo(&sql);
     appendStringInfo(&sql,
@@ -682,15 +787,15 @@ rp_generate_publication_ddl(PG_FUNCTION_ARGS)
         "index_heat AS ("
         "  SELECT tipt.relid,"
         "    CASE WHEN tipt.total_idx_scan = 0 THEN 0.0"
-        "         ELSE tipt.idx_scan::float8 / tipt.total_idx_scan END AS max_scan_share,"
-        "    (SELECT string_agg(format('%%I IS NOT NULL', a.attname), ' AND ' ORDER BY x.ord)"
-        "     FROM pg_index ix"
-        "     JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS x(attnum, ord)"
-        "          ON x.attnum > 0"
-        "     JOIN pg_attribute a ON a.attrelid = ix.indrelid AND a.attnum = x.attnum"
-        "     WHERE ix.indexrelid = tipt.indexrelid) AS row_filter_expr"
+        "         ELSE tipt.idx_scan::float8 / tipt.total_idx_scan END AS max_scan_share"
         "  FROM top_index_per_table tipt"
-        "),"
+        "),");
+
+    /* Splice in the data-driven row-filter CTE (verbatim, not formatted). */
+    appendStringInfoString(&sql, rp_best_filter_cte(has_pgss));
+    appendStringInfoString(&sql, ",");
+
+    appendStringInfo(&sql,
         "scored AS ("
         "  SELECT ts.schemaname, ts.tablename,"
         "    ts.write_ratio, ts.has_pk, ts.row_estimate,"
@@ -701,9 +806,10 @@ rp_generate_publication_ddl(PG_FUNCTION_ARGS)
         "         WHEN ts.write_ratio > %f          THEN 0.1"
         "         WHEN ts.row_estimate < 100        THEN 0.3"
         "         ELSE 1.0 END                       AS te,"
-        "    COALESCE(ih.row_filter_expr, '')       AS row_filter_expr"
+        "    COALESCE(bf.row_filter_expr, '')       AS row_filter_expr"
         "  FROM table_stats ts"
         "  LEFT JOIN index_heat ih ON ih.relid = ts.relid"
+        "  LEFT JOIN best_filter bf ON bf.relid = ts.relid"
         "),"
         "decisions AS ("
         "  SELECT *,"
@@ -780,11 +886,19 @@ rp_generate_publication_ddl(PG_FUNCTION_ARGS)
         }
         else
         {
+            /* PG15 requires every column referenced by a row filter to be
+             * part of the table's replica identity when the publication
+             * publishes UPDATE/DELETE.  Our data-driven filter uses an
+             * arbitrary column (e.g. region), which is normally NOT in the
+             * PK, so set REPLICA IDENTITY FULL first to keep the emitted
+             * DDL runnable while still replicating full DML for the slice. */
             appendStringInfo(&ddl,
+                "ALTER TABLE %s.%s REPLICA IDENTITY FULL;\n"
                 "CREATE PUBLICATION %s\n"
                 "  FOR TABLE %s.%s\n"
                 "  WHERE (%s)\n"
                 "  WITH (publish = 'insert, update, delete');",
+                qschema, qtable,
                 qpub_name.data, qschema, qtable, row_filter.data);
         }
 
